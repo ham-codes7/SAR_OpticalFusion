@@ -8,22 +8,23 @@ Innovative Design Project · guide: Prof. Velu M
 
 ## What you can do in the app
 
-- Pick a preset region or **draw your own area** on the map.
+- Pick a preset region or **draw your own area** — a box or any shape — on the map.
 - Choose a "before" and an "after" date range.
 - Swipe between before and after in optical, radar or fused view.
 - See detected change, its area in hectares, and precision / recall / F1 for each input.
 - Run a **cloud stress test**: hide part of the optical image and watch which inputs still work.
 - See the **cloud calendar**: clear optical days against radar days, month by month.
-- Download the detected change as GeoJSON.
+- Build a **year-by-year timeline** and scrub through the change as it accumulates.
+- Open a printable report, or download the detected change as GeoJSON.
 
 ## How it works
 
 | Step | What happens |
 |---|---|
-| Ingest | Sentinel-1 RTC (VV, VH) and Sentinel-2 L2A (B2, B3, B4, B8) from Microsoft Planetary Computer. No account needed. |
+| Ingest | Sentinel-1 RTC (VV, VH) and Sentinel-2 L2A (B2, B3, B4, B8, B11, B12) from Microsoft Planetary Computer. No account needed. |
 | Preprocess | Cloud masking from the Sentinel-2 scene classification; Lee speckle filter on radar; radar is already terrain-corrected. |
 | Co-register | Both sensors resampled onto one shared grid. |
-| Fuse | IHS substitution, PCA and wavelet fusion (pixel level), plus a six-band stack (feature level). |
+| Fuse | IHS substitution, PCA and wavelet fusion (pixel level), plus an eight-band stack (feature level). |
 | Detect | One gradient-boosted-tree recipe, trained once per input. Same features, settings and clean-up for every input. |
 | Evaluate | Scored against Impact Observatory annual land cover (2017–2023), plus SAM / ERGAS / SSIM / entropy for the fused images. |
 

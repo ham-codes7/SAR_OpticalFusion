@@ -45,8 +45,8 @@ the models and writes `models/model_card.json`.
 
 ## 4. How the models process data
 
-- **Inputs compared:** radar only (2 bands) · optical only (4 bands) · fused IHS / PCA / wavelet (4 bands each) · band stack (6 bands).
-- **Features per pixel:** before values, after values, difference, 5×5-smoothed difference. Identical recipe for every input.
+- **Inputs compared:** radar only (2 bands) · optical only (6 bands: B2, B3, B4, B8, B11, B12) · fused IHS / PCA / wavelet (6 bands each) · band stack (8 bands).
+- **Features per pixel:** before values, after values, difference, difference smoothed at two scales, local texture of each date. Identical recipe for every input.
 - **Model:** gradient-boosted trees (scikit-learn). Same settings for every input. No deep learning.
 - **Labels:** Impact Observatory 10 m annual land cover, 2017 → 2023. Forest loss = trees → crops / built / bare / rangeland. Urban growth = not built → built.
 - **Training data:** six regions per phenomenon; a quarter of each region held out in blocks; each region used once clear and once with synthetic cloud.
@@ -72,20 +72,20 @@ frontend/src/MapView.jsx  map, swipe, drawing
 | # | Chunk | Status | Done when |
 |---|---|---|---|
 | 1 | Data ingestion and co-registration | done | One area and date range returns aligned optical + radar in about 20 s |
-| 2 | Fusion methods and quality metrics | draft | Three fused images render and metrics compute on a preset |
-| 3 | Training pipeline and models | running | Twelve models saved, held-out scores in the model card |
-| 4 | Analysis API | draft | `/api/analyze` returns layers and scores for all four presets |
-| 5 | Front end: map, swipe, controls, results | draft | Full flow works in the browser on a preset |
-| 6 | Draw-your-own-area | draft | A hand-drawn rectangle analyses correctly |
-| 7 | Accuracy pass | todo | Detection quality reviewed on presets; features or labels tuned if weak |
-| 8 | Free-shape drawing (polygon) | todo | User draws any shape; results clipped to it |
+| 2 | Fusion methods and quality metrics | done | Three fused images render and metrics compute on a preset |
+| 3 | Training pipeline and models | done | Twelve models saved, held-out scores in the model card |
+| 4 | Analysis API | done | `/api/analyze` returns layers and scores for all four presets |
+| 5 | Front end: map, swipe, controls, results | done | Full flow works in the browser on a preset |
+| 6 | Draw-your-own-area | done | A hand-drawn rectangle analyses correctly |
+| 7 | Accuracy pass | done (one round) | Detection quality reviewed on presets; features or labels tuned if weak |
+| 8 | Free-shape drawing (polygon) | done | User draws any shape; results clipped to it |
 | 9 | Timeline: more than two dates | todo | User scrubs through several dates and sees change accumulate |
-| 10 | Report export and demo polish | todo | One-click PDF/PNG summary; presets pre-cached for the demo |
+| 10 | Report export and demo polish | done (HTML report; presets cached locally) | One-click PDF/PNG summary; presets pre-cached for the demo |
 | 11 | Push to GitHub | todo | Repo has code, models, README; teammates can run it |
 
 ## 7. Known risks
 
-- **Detection accuracy may be modest.** The reference land cover is itself noisy, and radar alone is weak on hill forest. An early run scored F1 of 0.13 (radar) and 0.36 (optical) on forest loss before a label-year fix; retraining is in progress.
+- **Detection accuracy is modest.** Held-out F1 is 0.42-0.50 for forest loss (radar alone 0.17) and 0.46-0.54 for urban growth. The reference land cover is itself noisy, and radar alone is weak on hill forest. Scores per input are in `backend/models/model_card.json`.
 - **Reference data is not fully independent.** Impact Observatory's map is derived from Sentinel-2. Global Forest Watch (Landsat-based) would be a stronger check for forest loss.
 - **Imagery service can drop connections** under heavy use. Retries are in place; presets should be pre-cached before a demo.
 - **Earth Engine is no longer needed.** The deck names it as the platform, so the review slides need updating.
