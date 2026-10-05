@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pystac-client
+planetary-computer
+rasterio
+numpy
+scipy
+scikit-image
+scikit-learn
+PyWavelets
+pillow
+joblib
+requests
