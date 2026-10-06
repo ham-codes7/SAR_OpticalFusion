@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import re
 
+import requests
 from fastapi import FastAPI, HTTPException
+from pystac_client.exceptions import APIError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -13,6 +15,14 @@ from . import analysis, detect, regions
 
 app = FastAPI(title="SAR-Optical Fusion API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+@app.exception_handler(requests.RequestException)
+@app.exception_handler(APIError)
+@app.exception_handler(RuntimeError)
+def imagery_unreachable(request, exc):
+    """Network trouble reaching the imagery service - say so plainly instead of a bare 500."""
+    return JSONResponse({"detail": "Could not reach the satellite imagery service. Check the internet connection and try again."}, status_code=502)
 
 
 class AnalyzeRequest(BaseModel):
@@ -45,8 +55,6 @@ def analyze(req: AnalyzeRequest):
         return analysis.run(tuple(req.bbox), tuple(req.before), tuple(req.after), req.phenomenon, req.cloud, req.polygon)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    except RuntimeError as e:  # imagery service unavailable
-        raise HTTPException(502, str(e))
 
 
 @app.get("/api/availability")

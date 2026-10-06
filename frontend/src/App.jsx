@@ -154,14 +154,15 @@ export default function App() {
     try {
       for (let i = 0; i < windows.length; i++) {
         setTimeline({ items: [...items], index: Math.max(0, items.length - 1), loading: `${i + 1} of ${windows.length}` });
-        const r = i === windows.length - 1 ? result : await request(windows[i], cloud);
+        const r = await request(windows[i], cloud); // finished years come straight from the cache
         items.push({ year: r.after.window[1].slice(0, 4), result: r });
-        if (i < windows.length - 1) setResult(r);
+        setResult(r);
       }
       setResult(items[items.length - 1].result);
       setTimeline({ items, index: items.length - 1, loading: null });
     } catch (e) {
       setError(e.message);
+      // keep the years that did finish; "Rebuild timeline" picks up the rest
       setTimeline(items.length > 1 ? { items, index: items.length - 1, loading: null } : null);
     }
   }
@@ -386,7 +387,9 @@ export default function App() {
               !timeline && <p className="hint">Re-run the analysis for each year between your two dates and scrub through the change as it builds up.</p>
             )}
             {timeline?.loading && <p className="hint">Analysing year {timeline.loading}…</p>}
-            {!timeline && <button className="ghost" onClick={buildTimeline} disabled={busy}>Build timeline</button>}
+            {!timeline?.loading && (
+              <button className="ghost" onClick={buildTimeline} disabled={busy}>{timeline ? "Rebuild timeline" : "Build timeline"}</button>
+            )}
           </section>
 
           <section>
