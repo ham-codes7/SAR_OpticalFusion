@@ -79,9 +79,9 @@ frontend/src/MapView.jsx  map, swipe, drawing
 | 6 | Draw-your-own-area | done | A hand-drawn rectangle analyses correctly |
 | 7 | Accuracy pass | done (one round) | Detection quality reviewed on presets; features or labels tuned if weak |
 | 8 | Free-shape drawing (polygon) | done | User draws any shape; results clipped to it |
-| 9 | Timeline: more than two dates | todo | User scrubs through several dates and sees change accumulate |
+| 9 | Timeline: more than two dates | done | User scrubs through several dates and sees change accumulate |
 | 10 | Report export and demo polish | done (HTML report; presets cached locally) | One-click PDF/PNG summary; presets pre-cached for the demo |
-| 11 | Push to GitHub | todo | Repo has code, models, README; teammates can run it |
+| 11 | Push to GitHub | done | Repo has code, models, README; teammates can run it |
 
 ## 7. Known risks
 
