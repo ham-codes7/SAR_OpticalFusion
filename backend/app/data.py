@@ -28,6 +28,7 @@ CROP_SLOTS = threading.BoundedSemaphore(8)
 S2_BANDS = ["B02", "B03", "B04", "B08", "B11", "B12"]  # blue, green, red, NIR, SWIR1, SWIR2
 S2_BAD_SCL = [0, 1, 3, 8, 9, 10]  # nodata, saturated, shadow, cloud med/high, cirrus
 R_EARTH = 6378137.0
+PIXEL_M = 20.0  # one ground resolution for training and analysis; models only work at the scale they learned
 POOL = ThreadPoolExecutor(max_workers=24)
 
 
@@ -51,12 +52,12 @@ def _merc(lon: float, lat: float) -> tuple[float, float]:
     return x, y
 
 
-def make_grid(bbox, max_px: int = 640) -> Grid:
+def make_grid(bbox) -> Grid:
     west, south, east, north = bbox
     x0, y0 = _merc(west, south)
     x1, y1 = _merc(east, north)
     scale = math.cos(math.radians((south + north) / 2))  # mercator stretch
-    res = max(10.0 / scale, max(x1 - x0, y1 - y0) / max_px)
+    res = PIXEL_M / scale
     width = max(8, round((x1 - x0) / res))
     height = max(8, round((y1 - y0) / res))
     return Grid(tuple(bbox), from_origin(x0, y1, res, res), width, height, res * scale)
@@ -167,11 +168,34 @@ def lee_filter(img: np.ndarray, size: int = 5) -> np.ndarray:
     return out
 
 
-def load_sar(grid: Grid, start: str, end: str, max_scenes: int = 6) -> dict:
-    """Speckle-filtered temporal-mean Sentinel-1 RTC backscatter, in dB (VV, VH)."""
+def _tracks(items, grid: Grid) -> list:
+    """Relative orbits used for this area: the best-covering one, plus the next one in the
+    same look direction if the first does not cover the whole area.
+
+    Mixing ascending and descending passes, or different mixes in each window, makes the
+    viewing geometry change between dates, which on slopes looks like land change. The
+    choice depends only on track footprints, so every date window gets the same tracks.
+    """
+    cover: dict[tuple, float] = {}
+    for i in items:
+        key = (i.properties.get("sat:orbit_state"), i.properties.get("sat:relative_orbit"))
+        cover[key] = max(cover.get(key, 0.0), round(_covers(i, grid), 2))
+    ranked = sorted(cover, key=lambda k: (-cover[k], k[0] != "descending", k[1]))
+    if not ranked:
+        return []
+    keep = [ranked[0]]
+    if cover[ranked[0]] < 0.95:
+        keep += [k for k in ranked[1:] if k[0] == ranked[0][0]][:1]
+    return keep
+
+
+def load_sar(grid: Grid, start: str, end: str, max_scenes: int = 10) -> dict:
+    """Speckle-filtered temporal-mean Sentinel-1 RTC backscatter, in dB (VV, VH), from fixed orbit tracks."""
     items = _search("sentinel-1-rtc", grid, start, end)
     usable = [i for i in items if "vv" in i.assets and "vh" in i.assets]
-    chosen = sorted(usable, key=lambda i: -_covers(i, grid))[:max_scenes]
+    tracks = _tracks(usable, grid)
+    usable = [i for i in usable if (i.properties.get("sat:orbit_state"), i.properties.get("sat:relative_orbit")) in tracks]
+    chosen = sorted(usable, key=lambda i: (-round(_covers(i, grid), 1), i.datetime))[:max_scenes]
 
     def one(item):
         st = _crop(item, ["vv", "vh"], grid)
@@ -195,6 +219,7 @@ def load_sar(grid: Grid, start: str, end: str, max_scenes: int = 6) -> dict:
         "scenes_found": len(items),
         "scenes_used": [i.id for i in chosen],
         "dates_used": sorted(i.datetime.date().isoformat() for i in chosen),
+        "tracks": [f"{o} {r}" for o, r in tracks],
         "valid_fraction": float(np.isfinite(db[0]).mean()),
     }
 
@@ -212,3 +237,30 @@ def load_landcover(grid: Grid, year: int) -> np.ndarray | None:
         tile = np.nan_to_num(_crop(it, ["data"], grid, "nearest")[0])
         out = np.where(out == 0, tile, out)
     return out.astype("uint8")
+
+
+HANSEN_URL = "https://storage.googleapis.com/earthenginepartners-hansen/GFC-2024-v1.12/Hansen_GFC-2024-v1.12_lossyear_{lat}_{lon}.tif"
+NO_DATA = 255
+
+
+def load_forest_loss(grid: Grid) -> np.ndarray:
+    """Hansen Global Forest Change (Landsat, 30 m): year of forest loss, 1 = 2001 ... 24 = 2024, 0 = none.
+
+    Read straight from the public 10-degree tiles, only the window over the area.
+    """
+    from rasterio.warp import reproject, Resampling
+    from rasterio.windows import from_bounds
+
+    w, s, e, n = grid.bbox
+    out = np.full((grid.height, grid.width), NO_DATA, "uint8")
+    for top in range(math.ceil(n / 10) * 10, math.floor(s / 10) * 10, -10):
+        for left in range(math.floor(w / 10) * 10, math.ceil(e / 10) * 10, 10):
+            name = dict(lat=f"{abs(top):02d}{'N' if top >= 0 else 'S'}", lon=f"{abs(left):03d}{'E' if left >= 0 else 'W'}")
+            with rasterio.open("/vsicurl/" + HANSEN_URL.format(**name)) as src:
+                win = from_bounds(max(w, left) - 0.01, max(s, top - 10) - 0.01, min(e, left + 10) + 0.01, min(n, top) + 0.01, src.transform)
+                win = win.round_offsets().round_lengths()
+                tile = np.full((grid.height, grid.width), NO_DATA, "uint8")
+                reproject(src.read(1, window=win), tile, src_transform=src.window_transform(win), src_crs=src.crs,
+                          dst_transform=grid.transform, dst_crs=grid.crs, dst_nodata=NO_DATA, resampling=Resampling.nearest)
+            out = np.where(tile != NO_DATA, tile, out)
+    return out

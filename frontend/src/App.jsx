@@ -8,8 +8,9 @@ const PHENOMENA = {
 const BASE_LAYERS = [
   ["optical", "Optical"],
   ["sar", "Radar"],
-  ["stack-view", "Fused"],
+  ["fused", "Fused"],
 ];
+const CLOUD_LEVELS = [0, 0.2, 0.4, 0.6];
 const FUSION_VIEWS = [["ihs", "IHS"], ["pca", "PCA"], ["wavelet", "Wavelet"]];
 const FUSED_VARIANTS = [["stack", "Band stack"], ["ihs", "IHS"], ["pca", "PCA"], ["wavelet", "Wavelet"]];
 const STEPS = [
@@ -64,10 +65,11 @@ export default function App() {
   const [error, setError] = useState(null);
 
   const [base, setBase] = useState("optical");
-  const [fusionView, setFusionView] = useState("wavelet");
   const [variant, setVariant] = useState("stack");
   const [fusedVariant, setFusedVariant] = useState("stack");
-  const [show, setShow] = useState({ change: true, reference: false, blind: true });
+  const [overlay, setOverlay] = useState("detected"); // "detected" | "errors" | "off"
+  const [collapsed, setCollapsed] = useState(false);
+  const [cloudTest, setCloudTest] = useState(null); // { points: [{ cloud, result }], loading }
   const [split, setSplit] = useState(0.5);
   const [calendar, setCalendar] = useState(null);
 
@@ -108,6 +110,7 @@ export default function App() {
     setPolygon(null);
     setResult(null);
     setTimeline(null);
+    setCloudTest(null);
   }
 
   function pickPreset(p) {
@@ -116,6 +119,7 @@ export default function App() {
     setPolygon(null);
     setResult(null);
     setTimeline(null);
+    setCloudTest(null);
     setDrawing(null);
     setError(null);
   }
@@ -131,6 +135,7 @@ export default function App() {
     setPolygon(shape);
     setResult(null);
     setTimeline(null);
+    setCloudTest(null);
   }
 
   const request = (after, cloudFraction) =>
@@ -179,10 +184,11 @@ export default function App() {
     try {
       const r = await request(dates.after, cloudFraction);
       setTimeline(null);
+      setCloudTest(null);
       setResult(r);
-      setFusedVariant(r.best_fused);
-      setVariant(r.best_fused);
-      setShow((s) => ({ ...s, change: true }));
+      selectFused(r.best_fused);
+      setOverlay(r.reference.available ? "errors" : "detected");
+      setCollapsed(true);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -190,7 +196,36 @@ export default function App() {
     }
   }
 
-  const baseLayer = base === "stack-view" ? fusionView : base;
+  // Re-run at several synthetic-cloud levels and plot detection F1 for each input.
+  async function runCloudTest() {
+    const points = [];
+    setError(null);
+    try {
+      for (let i = 0; i < CLOUD_LEVELS.length; i++) {
+        setCloudTest({ points: [...points], loading: `${i + 1} of ${CLOUD_LEVELS.length}` });
+        points.push({ cloud: CLOUD_LEVELS[i], result: await request(dates.after, CLOUD_LEVELS[i]) });
+      }
+      setCloudTest({ points, loading: null });
+    } catch (e) {
+      setError(e.message);
+      setCloudTest(points.length > 1 ? { points, loading: null } : null);
+    }
+  }
+
+  // One selection drives both the map image and the change overlay.
+  function selectInput(key) {
+    setVariant(key);
+    setBase(key === "sar" ? "sar" : key === "optical" || key === "stack" ? "optical" : "fused");
+    setOverlay((o) => (o === "off" ? "detected" : o));
+  }
+
+  function selectFused(key) {
+    setFusedVariant(key);
+    selectInput(key);
+  }
+
+  // The band stack is not a single image, so "Fused" imagery needs a pixel-level method.
+  const baseLayer = base === "fused" ? (fusedVariant === "stack" ? "optical" : fusedVariant) : base;
   const info = PHENOMENA[phenomenon];
   const rows = result
     ? [
@@ -199,7 +234,7 @@ export default function App() {
         { key: fusedVariant, name: "Fused", tone: "fused", v: result.variants[fusedVariant], fused: true },
       ]
     : [];
-  const headline = result?.variants[fusedVariant];
+  const headline = result?.variants[variant];
   const datesInvalid = dates && (dates.before[0] >= dates.before[1] || dates.after[0] >= dates.after[1] || dates.before[1] >= dates.after[0]);
 
   return (
@@ -210,7 +245,8 @@ export default function App() {
         opacity={opacity}
         result={result}
         baseLayer={baseLayer}
-        overlays={{ ...show, variant }}
+        overlays={{ overlay, variant, blind: true }}
+        leftCollapsed={collapsed && !!result}
         drawing={drawing}
         onDrawn={onDrawn}
         split={split}
@@ -218,6 +254,22 @@ export default function App() {
       />
 
       {/* ------------------------------------------------ control panel */}
+      {collapsed && result ? (
+        <aside className="panel left compact">
+          <header className="brand">
+            <div className="mark"><i className="sar" /><i className="optical" /><i className="fused" /></div>
+            <div><h1>Overcast</h1></div>
+          </header>
+          <dl className="summary">
+            <dt>Watching</dt><dd>{info.label}</dd>
+            <dt>Where</dt><dd>{presets.find((p) => p.id === presetId)?.name ?? `Custom ${polygon ? "shape" : "area"} · ${km(area)}`}</dd>
+            <dt>When</dt><dd>{dates.before[0].slice(0, 7)} → {dates.after[1].slice(0, 7)}</dd>
+            {result.cloud.simulated_pct > 0 && <><dt>Cloud</dt><dd>{result.cloud.simulated_pct}% synthetic</dd></>}
+          </dl>
+          <button className="ghost" onClick={() => setCollapsed(false)}>Change area, dates or cloud</button>
+          {error && <p className="warn">{error}</p>}
+        </aside>
+      ) : (
       <aside className="panel left">
         <header className="brand">
           <div className="mark"><i className="sar" /><i className="optical" /><i className="fused" /></div>
@@ -287,27 +339,32 @@ export default function App() {
         {!area && !error && <p className="hint center">Pick a place or draw an area to begin.</p>}
         {config && !config.models_ready && <p className="warn">The detection models are not trained yet.</p>}
         {error && <p className="warn">{error}</p>}
+        {result && <button className="ghost" style={{ marginTop: 10 }} onClick={() => setCollapsed(true)}>Hide settings</button>}
       </aside>
+      )}
 
       {/* ------------------------------------------------ map toolbar */}
       {result && (
         <div className="toolbar">
+          <span className="tb-label">Image</span>
           <div className="segmented small">
             {BASE_LAYERS.map(([k, label]) => (
-              <button key={k} className={base === k ? "on" : ""} onClick={() => setBase(k)}>{label}</button>
+              <button key={k} className={base === k ? "on" : ""} onClick={() => setBase(k)}
+                disabled={k === "fused" && fusedVariant === "stack"}
+                title={k === "fused" ? (fusedVariant === "stack" ? "The band stack is not a single image; pick IHS, PCA or Wavelet to view a fused image" : `${result.variants[fusedVariant].label} image`) : undefined}>
+                {k === "fused" && fusedVariant !== "stack" ? `Fused · ${FUSED_VARIANTS.find(([v]) => v === fusedVariant)[1]}` : label}
+              </button>
             ))}
           </div>
-          {base === "stack-view" && (
-            <div className="segmented small">
-              {FUSION_VIEWS.map(([k, label]) => (
-                <button key={k} className={fusionView === k ? "on" : ""} onClick={() => setFusionView(k)}>{label}</button>
-              ))}
-            </div>
-          )}
-          <label className="check"><input type="checkbox" checked={show.change} onChange={(e) => setShow({ ...show, change: e.target.checked })} /> Detected change</label>
-          <input className="opacity" type="range" min="0.2" max="1" step="0.05" value={opacity} onChange={(e) => setOpacity(+e.target.value)} title="Overlay opacity" aria-label="Overlay opacity" />
-          {result.reference.available && (
-            <label className="check"><input type="checkbox" checked={show.reference} onChange={(e) => setShow({ ...show, reference: e.target.checked })} /> <i className="dot ref" /> Reference</label>
+          <span className="tb-label">Change</span>
+          <div className="segmented small">
+            <button className={overlay === "detected" ? "on" : ""} onClick={() => setOverlay("detected")}>Detected</button>
+            {result.reference.available && <button className={overlay === "errors" ? "on" : ""} onClick={() => setOverlay("errors")}>vs reference</button>}
+            <button className={overlay === "off" ? "on" : ""} onClick={() => setOverlay("off")}>Off</button>
+          </div>
+          {overlay !== "off" && <input className="opacity" type="range" min="0.2" max="1" step="0.05" value={opacity} onChange={(e) => setOpacity(+e.target.value)} title="Overlay opacity" aria-label="Overlay opacity" />}
+          {overlay === "errors" && (
+            <div className="legend inline"><i className="dot ok" /> Correct <i className="dot fa" /> False alarm <i className="dot miss" /> Missed</div>
           )}
         </div>
       )}
@@ -326,9 +383,22 @@ export default function App() {
       {result && headline && (
         <aside className="panel right">
           <section className="headline">
-            <span className="eyebrow">{info.label} · {result.before.window[0].slice(0, 4)} → {result.after.window[1].slice(0, 4)}</span>
-            <div className="big">{fmt(headline.area_ha)} <small>ha</small></div>
-            <p>{info.unit} — {headline.share_pct}% of the {fmt(result.grid.area_ha)} ha analysed, at {result.grid.pixel_m} m per pixel.</p>
+            <span className="eyebrow">{info.label} · {result.before.window[0].slice(0, 4)} → {result.after.window[1].slice(0, 4)} · {headline.label}</span>
+            {result.reference.available ? (
+              <>
+                <div className="versus">
+                  <div><span>Detected</span><b>{fmt(headline.area_ha)} <small>ha</small></b></div>
+                  <div><span>Reference</span><b>{fmt(result.reference.area_ha)} <small>ha</small></b></div>
+                </div>
+                <p className="verdict">
+                  Found <b>{Math.round(headline.scores.recall * 100)}%</b> of the {info.noun} the reference records.{" "}
+                  <b>{Math.round(headline.scores.precision * 100)}%</b> of what it flagged is confirmed; the rest are false alarms.
+                </p>
+              </>
+            ) : (
+              <div className="big">{fmt(headline.area_ha)} <small>ha</small></div>
+            )}
+            <p>{result.reference.available ? "Detected area is" : info.unit + ":"} {headline.share_pct}% of the {fmt(result.grid.area_ha)} ha analysed, at {result.grid.pixel_m} m per pixel.</p>
           </section>
 
           <section>
@@ -341,7 +411,7 @@ export default function App() {
             )}
             <div className="rows">
               {rows.map((r) => (
-                <button key={r.name} className={`row ${r.tone} ${variant === r.key ? "on" : ""}`} onClick={() => { setVariant(r.key); setShow((s) => ({ ...s, change: true })); }}>
+                <button key={r.name} className={`row ${r.tone} ${variant === r.key ? "on" : ""}`} onClick={() => selectInput(r.key)}>
                   <div className="row-top">
                     <span className="swatch" />
                     <strong>{r.name}</strong>
@@ -358,7 +428,7 @@ export default function App() {
                       ))}
                     </div>
                   ) : (
-                    <div className="scores-none">Held-out test F1: {r.v.holdout.clear.f1.toFixed(2)} clear · {r.v.holdout.cloudy.f1.toFixed(2)} cloudy</div>
+                    <div className="scores-none">Unseen-region F1: {r.v.holdout.clear.f1.toFixed(2)} clear · {r.v.holdout.cloudy.f1.toFixed(2)} cloudy</div>
                   )}
                   {r.v.blind_pct > 0.5 && <div className="blind">Blind over {r.v.blind_pct}% of the area</div>}
                 </button>
@@ -367,7 +437,7 @@ export default function App() {
             <div className="chips">
               <span>Fusion method</span>
               {FUSED_VARIANTS.map(([k, label]) => (
-                <button key={k} className={fusedVariant === k ? "on" : ""} onClick={() => { setFusedVariant(k); setVariant(k); }}>
+                <button key={k} className={fusedVariant === k ? "on" : ""} onClick={() => selectFused(k)}>
                   {label}{k === result.best_fused ? " ★" : ""}
                 </button>
               ))}
@@ -375,8 +445,26 @@ export default function App() {
             <p className="hint">
               {result.reference.available
                 ? `Scored against ${result.reference.source} (${result.reference.years.join(" → ")}), which shows ${fmt(result.reference.area_ha)} ha of ${info.noun}. The same detector runs on every input; only the input changes.`
-                : "No reference land cover exists for these dates (it covers 2017–2023), so scores shown are from the models’ held-out test regions."}
+                : "No reference data covers these dates (forest loss: 2001–2024; urban growth: 2017–2023), so scores shown are from regions the models never trained on."}
             </p>
+          </section>
+
+          <section>
+            <h3>Cloud stress test</h3>
+            {cloudTest && cloudTest.points.length > 1 && (
+              <CloudChart points={cloudTest.points} fused={fusedVariant} fusedLabel={result.variants[fusedVariant].label} />
+            )}
+            {!cloudTest && (
+              <p className="hint">
+                {result.reference.available
+                  ? "Hide 0–60% of the optical image behind synthetic cloud and see how each input's accuracy holds up."
+                  : "Needs reference data for these dates to score each input."}
+              </p>
+            )}
+            {cloudTest?.loading && <p className="hint">Running cloud level {cloudTest.loading}…</p>}
+            {result.reference.available && !cloudTest?.loading && (
+              <button className="ghost" onClick={runCloudTest} disabled={busy || !!timeline?.loading}>{cloudTest ? "Run again" : "Run cloud test (0–60%)"}</button>
+            )}
           </section>
 
           <section>
@@ -466,6 +554,42 @@ function Calendar({ data }) {
       </div>
       <div className="legend"><i className="dot optical" /> Clear optical days <i className="dot sar" /> Radar days</div>
       <p className="hint">{clear} clear optical days against {sar} radar days this year{dark > 0 ? `; ${dark} month${dark > 1 ? "s" : ""} had no clear optical image at all` : ""}.</p>
+    </div>
+  );
+}
+
+function CloudChart({ points, fused, fusedLabel }) {
+  const W = 330, H = 150, L = 30, B = 22, T = 8, R = 8;
+  const series = [["sar", "Radar only", "var(--sar)"], ["optical", "Optical only", "var(--optical)"], [fused, fusedLabel, "var(--fused)"]];
+  const f1 = (p, k) => p.result.variants[k].scores?.f1 ?? 0;
+  const top = Math.max(0.5, Math.ceil(Math.max(...points.flatMap((p) => series.map(([k]) => f1(p, k)))) * 10) / 10);
+  const x = (c) => L + (c / 0.6) * (W - L - R);
+  const y = (v) => T + (1 - v / top) * (H - T - B);
+  const last = points[points.length - 1];
+  return (
+    <div className="cloudchart">
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Detection F1 against synthetic cloud cover for each input">
+        {[0, top / 2, top].map((v) => (
+          <g key={v}>
+            <line x1={L} x2={W - R} y1={y(v)} y2={y(v)} className="grid" />
+            <text x={L - 6} y={y(v) + 3} textAnchor="end">{v.toFixed(1)}</text>
+          </g>
+        ))}
+        {CLOUD_LEVELS.map((c) => <text key={c} x={x(c)} y={H - 6} textAnchor="middle">{Math.round(c * 100)}%</text>)}
+        {series.map(([k, , color]) => (
+          <g key={k} style={{ color }}>
+            <polyline fill="none" stroke="currentColor" strokeWidth="2" points={points.map((p) => `${x(p.cloud)},${y(f1(p, k))}`).join(" ")} />
+            {points.map((p) => <circle key={p.cloud} cx={x(p.cloud)} cy={y(f1(p, k))} r="3" fill="currentColor"><title>{`${Math.round(p.cloud * 100)}% cloud: F1 ${f1(p, k).toFixed(2)}`}</title></circle>)}
+          </g>
+        ))}
+      </svg>
+      <div className="legend">
+        {series.map(([k, label, color]) => <span key={k}><i className="dot" style={{ background: color }} /> {label}</span>)}
+      </div>
+      <p className="hint">
+        Detection F1 as synthetic cloud hides more of the optical image. At {Math.round(last.cloud * 100)}% cloud:{" "}
+        {series.map(([k, label]) => `${label} ${f1(last, k).toFixed(2)}`).join(" · ")}.
+      </p>
     </div>
   );
 }

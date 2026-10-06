@@ -47,6 +47,10 @@ TRAINING = {
         [76.94, 28.38, 77.10, 28.50],  # Gurugram
         [77.62, 12.80, 77.78, 12.92],  # Bengaluru south-east
         [78.44, 17.20, 78.60, 17.32],  # Hyderabad south
+        [77.40, 28.42, 77.56, 28.54],  # Greater Noida
+        [88.42, 22.52, 88.58, 22.64],  # Kolkata, New Town
+        [75.74, 26.76, 75.90, 26.88],  # Jaipur south
+        [80.92, 26.74, 81.08, 26.86],  # Lucknow south-east
     ],
     "deforestation": [
         [92.60, 23.90, 92.76, 24.02],  # Mizoram north
@@ -55,5 +59,9 @@ TRAINING = {
         [90.30, 25.50, 90.46, 25.62],  # Meghalaya, Garo hills
         [93.60, 24.40, 93.76, 24.52],  # Manipur
         [92.90, 25.20, 93.06, 25.32],  # Dima Hasao, Assam
+        [91.80, 23.90, 91.96, 24.02],  # Tripura north
+        [95.80, 27.30, 95.96, 27.42],  # Arunachal, Changlang foothills
+        [92.40, 23.80, 92.56, 23.92],  # Mizoram west, Mamit
+        [93.40, 24.90, 93.56, 25.02],  # Manipur, Tamenglong
     ],
 }

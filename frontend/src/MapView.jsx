@@ -10,7 +10,7 @@ const ATTRIB =
  * Leaflet map with a before/after swipe, a change overlay and rectangle drawing.
  * Leaflet owns the DOM here; React only pushes props in through effects.
  */
-export default function MapView({ area, polygon, result, baseLayer, overlays, opacity, drawing, onDrawn, split, onSplit }) {
+export default function MapView({ area, polygon, result, baseLayer, overlays, opacity, drawing, onDrawn, split, onSplit, leftCollapsed }) {
   const el = useRef(null);
   const map = useRef(null);
   const layers = useRef({});
@@ -57,8 +57,9 @@ export default function MapView({ area, polygon, result, baseLayer, overlays, op
     const bounds = [[s, w], [n, e]];
     const style = { color: "#f4f0e8", weight: 1.5, dashArray: result ? null : "6 6", fill: !result, fillOpacity: 0.06, interactive: false };
     areaRect.current = (polygon ? L.polygon(polygon.map(([lon, lat]) => [lat, lon]), style) : L.rectangle(bounds, style)).addTo(m);
-    m.flyToBounds(bounds, { padding: [60, 60], paddingTopLeft: [400, 90], paddingBottomRight: [result ? 420 : 60, 60], duration: 0.8 });
-  }, [area, polygon, !!result]);
+    // keep the area clear of the panels: full settings panel on the left, or just its compact card at the top
+    m.flyToBounds(bounds, { paddingTopLeft: leftCollapsed ? [40, 210] : [400, 90], paddingBottomRight: [result ? 420 : 60, 50], duration: 0.8 });
+  }, [area, polygon, !!result, leftCollapsed]);
 
   // ---- imagery + overlays
   useEffect(() => {
@@ -73,10 +74,10 @@ export default function MapView({ area, polygon, result, baseLayer, overlays, op
     add("before", result.layers.before[baseLayer], "before");
     add("after", result.layers.after[baseLayer], "after");
     if (overlays.blind) add("blind", result.layers.change.optical_blind, "blind");
-    if (overlays.reference) add("reference", result.layers.change.reference, "reference", 0.85);
-    if (overlays.change) add("change", result.layers.change[overlays.variant], "change", opacity);
+    const changeLayer = { detected: overlays.variant, errors: `errors_${overlays.variant}` }[overlays.overlay];
+    if (changeLayer) add("change", result.layers.change[changeLayer], "change", opacity);
     clip(m, splitRef.current);
-  }, [result, baseLayer, overlays.change, overlays.reference, overlays.blind, overlays.variant]);
+  }, [result, baseLayer, overlays.overlay, overlays.blind, overlays.variant]);
 
   useEffect(() => {
     layers.current.change?.setOpacity(opacity);

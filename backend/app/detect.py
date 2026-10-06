@@ -28,17 +28,34 @@ VARIANT_LABELS = {
 }
 MODEL_PARAMS = dict(max_iter=150, learning_rate=0.08, max_leaf_nodes=31, min_samples_leaf=40, l2_regularization=1.0, class_weight="balanced", random_state=7)
 GAP_FILL = -1.0
+FOREST_YEARS = (2000, 2024)  # Hansen Global Forest Change v1.12
+LANDCOVER_YEARS = (2017, 2023)  # Impact Observatory annual land cover
+
+
+def _nd(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    return (a - b) / (a + b + 1e-6)
+
+
+def optical_indices(opt: np.ndarray) -> np.ndarray:
+    """NDVI (vegetation), NDBI (built-up), MNDWI (water), NBR (clearing / burn) from B2 B3 B4 B8 B11 B12."""
+    _, g, r, nir, swir1, swir2 = opt[:6]
+    return np.stack([_nd(nir, r), _nd(swir1, nir), _nd(g, swir1), _nd(nir, swir2)])
+
+
+def sar_indices(sar_db: np.ndarray) -> np.ndarray:
+    """VV - VH in dB: the cross-pol ratio, high for bare / built surfaces, low for vegetation volume."""
+    return (sar_db[0] - sar_db[1])[None]
 
 
 def variant_stack(variant: str, opt: np.ndarray, sar_db: np.ndarray) -> np.ndarray:
-    """Band stack for one date. NaN means the variant cannot see that pixel."""
+    """Band stack for one date, plus the standard indices of its bands. NaN means the variant cannot see that pixel."""
     if variant == "sar":
-        return sar_db
-    if variant == "optical":
-        return opt
-    if variant == "stack":  # feature-level fusion: all six bands side by side
-        return np.concatenate([np.where(np.isfinite(opt), opt, GAP_FILL), sar_db])
-    return fusion.fuse(variant, opt, sar_db)
+        return np.concatenate([sar_db, sar_indices(sar_db)])
+    if variant == "stack":  # feature-level fusion: all bands side by side, optical gaps filled
+        o = np.concatenate([opt, optical_indices(opt)])
+        return np.concatenate([np.where(np.isfinite(o), o, GAP_FILL), sar_db, sar_indices(sar_db)])
+    bands = opt if variant == "optical" else fusion.fuse(variant, opt, sar_db)
+    return np.concatenate([bands, optical_indices(bands)])
 
 
 def _local_std(x: np.ndarray, size: int = 5) -> np.ndarray:
@@ -64,13 +81,17 @@ def features(before: np.ndarray, after: np.ndarray) -> tuple[np.ndarray, np.ndar
     return x.reshape(x.shape[0], -1).T, valid.ravel()
 
 
-def reference_change(phenomenon: str, lc_before: np.ndarray, lc_after: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Reference change mask from two land-cover maps, plus the pixels that can be scored."""
+def forest_reference(loss_year: np.ndarray, yb: int, ya: int) -> tuple[np.ndarray, np.ndarray]:
+    """Forest loss recorded by Hansen Global Forest Change in the years after `yb` up to and including `ya`."""
+    known = loss_year != 255
+    change = (loss_year >= yb + 1 - 2000) & (loss_year <= ya - 2000) & known
+    return change, known
+
+
+def urban_reference(lc_before: np.ndarray, lc_after: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """New built-up area between two Impact Observatory annual land-cover maps (water excluded)."""
     known = (lc_before > 0) & (lc_after > 0) & (lc_before != 10) & (lc_after != 10)
-    if phenomenon == "deforestation":
-        change = (lc_before == 2) & np.isin(lc_after, [5, 7, 8, 11])
-    else:
-        change = (lc_before != 7) & (lc_before != 1) & (lc_after == 7)
+    change = (lc_before != 7) & (lc_before != 1) & (lc_after == 7)
     return change & known, known
 
 

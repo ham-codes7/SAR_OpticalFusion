@@ -3,10 +3,13 @@
     python train.py                 # everything
     python train.py urban           # just one phenomenon, merged into the model card
 
-Labels come from Impact Observatory annual land cover (2017 -> 2023). Each
-region is split into 64-pixel blocks; a quarter of the blocks are held out and
-never trained on. Every region is used twice: once clear, once with synthetic
-cloud over the optical image, so the fused models learn to lean on SAR.
+Labels: Hansen Global Forest Change for forest loss; Impact Observatory annual land
+cover for urban growth. Scores are leave-region-out:
+the regions are split into five folds, each fold is predicted by a model that never
+saw it, and the cut-off is chosen on those unseen-region predictions. The final model
+is then trained on every region and also scored on the app presets, which are never
+trained on. Every region is used twice, once clear and once with synthetic cloud over
+the optical image, so the fused models learn to lean on radar.
 """
 import json
 import sys
@@ -20,92 +23,127 @@ from app import detect, regions, scenes
 
 CLOUD_AFTER, CLOUD_BEFORE = 0.35, 0.15
 YEARS = (detect.reference_year(*regions.BEFORE), detect.reference_year(*regions.AFTER))
+FOLDS = 5
+THRESHOLDS = np.round(np.arange(0.3, 0.96, 0.05), 2)
 RNG = np.random.default_rng(11)
 
 
-def fetch(bbox):
+def fetch(phen, bbox):
     b = scenes.load_scene(bbox, *regions.BEFORE)
     a = scenes.load_scene(bbox, *regions.AFTER)
-    return b, a, scenes.load_landcover(bbox, YEARS[0]), scenes.load_landcover(bbox, YEARS[1])
+    ref, known = scenes.load_reference(bbox, phen, *YEARS)
+    return b, a, ref.ravel(), known.ravel(), ref.shape
 
 
-def test_blocks(shape, idx):
-    rows, cols = np.indices(shape) // 64
-    return ((rows * 7 + cols * 13 + idx * 5) % 4 == 0).ravel()
-
-
-def condition(b, a, cloudy, seed):
+def features(variant, region, cloudy, seed):
+    b, a, *_ = region
     opt_b, opt_a = b["opt"], a["opt"]
     if cloudy:
         shape = opt_a.shape[1:]
         opt_a = scenes.apply_cloud(opt_a, scenes.simulate_cloud(shape, CLOUD_AFTER, seed))
         opt_b = scenes.apply_cloud(opt_b, scenes.simulate_cloud(shape, CLOUD_BEFORE, seed + 100))
-    return opt_b, opt_a
+    return detect.features(detect.variant_stack(variant, opt_b, b["sar"]), detect.variant_stack(variant, opt_a, a["sar"]))
+
+
+def sample(x, valid, y, known):
+    pool = valid & known
+    pos = np.flatnonzero(pool & y)
+    neg = np.flatnonzero(pool & ~y)
+    pos = RNG.choice(pos, min(len(pos), 4000), replace=False)
+    neg = RNG.choice(neg, min(len(neg), 3 * max(len(pos), 500)), replace=False)
+    take = np.concatenate([pos, neg])
+    return x[take], y[take]
+
+
+def counts(model, x, valid, y, known, shape):
+    """tp, fp, fn at every candidate cut-off."""
+    prob = np.full(len(y), np.nan, "float32")
+    if valid.any():
+        prob[valid] = model.predict_proba(x[valid])[:, 1]
+    prob = prob.reshape(shape)
+    out = {}
+    for t in THRESHOLDS:
+        m = detect.to_mask(prob, t).ravel()
+        out[t] = np.array([(m & y & known).sum(), (m & ~y & known).sum(), (~m & y & known).sum()])
+    return out
+
+
+def scores(c):
+    tp, fp, fn = (int(v) for v in c)
+    p = tp / (tp + fp) if tp + fp else 0.0
+    r = tp / (tp + fn) if tp + fn else 0.0
+    return {"precision": round(p, 3), "recall": round(r, 3), "f1": round(2 * p * r / (p + r) if p + r else 0.0, 3)}
+
+
+def add(total, c):
+    for t in THRESHOLDS:
+        total[t] = total.get(t, 0) + c[t]
+
+
+def train_variant(variant, train, tests):
+    t0 = time.time()
+    samples = {}
+    for i, region in enumerate(train):
+        for cloudy in (False, True):
+            x, valid = features(variant, region, cloudy, i)
+            samples[i, cloudy] = sample(x, valid, region[2], region[3])
+
+    def fit(idx):
+        keys = [k for k in samples if k[0] in idx]
+        return detect.new_model().fit(np.concatenate([samples[k][0] for k in keys]), np.concatenate([samples[k][1] for k in keys]))
+
+    unseen = {False: {}, True: {}}
+    folds = [i % FOLDS for i in range(len(train))]
+    for f in range(FOLDS):
+        model = fit([i for i in range(len(train)) if folds[i] != f])
+        for i in (i for i in range(len(train)) if folds[i] == f):
+            for cloudy in (False, True):
+                add(unseen[cloudy], counts(model, *features(variant, train[i], cloudy, i), *train[i][2:]))
+    threshold = float(max(THRESHOLDS, key=lambda t: scores(unseen[False][t] + unseen[True][t])["f1"]))
+
+    model = fit(range(len(train)))
+    joblib.dump({"model": model, "threshold": threshold}, detect.MODEL_DIR / f"{PHEN}_{variant}.joblib", compress=3)
+    presets = {False: {}, True: {}}
+    for j, region in enumerate(tests):
+        for cloudy in (False, True):
+            add(presets[cloudy], counts(model, *features(variant, region, cloudy, 50 + j), *region[2:]))
+    entry = {
+        "train_pixels": int(sum(len(v[1]) for v in samples.values())),
+        "threshold": threshold,
+        "clear": scores(unseen[False][threshold]),
+        "cloudy": scores(unseen[True][threshold]),
+        "presets": {"clear": scores(presets[False][threshold]), "cloudy": scores(presets[True][threshold])},
+    }
+    print(f"  {variant:8s} thr {threshold:.2f}  unseen F1 {entry['clear']['f1']:.3f} / {entry['cloudy']['f1']:.3f}"
+          f"   presets F1 {entry['presets']['clear']['f1']:.3f} / {entry['presets']['cloudy']['f1']:.3f}   ({time.time() - t0:.0f}s)", flush=True)
+    return entry
 
 
 def main():
-    t0 = time.time()
-    card = {"labels": f"Impact Observatory 10 m annual land cover, {YEARS[0]} -> {YEARS[1]}", "model": "HistGradientBoostingClassifier (scikit-learn)", "model_params": detect.MODEL_PARAMS,
-            "cloud_test_fraction": CLOUD_AFTER, "phenomena": {}}
+    global PHEN
     detect.MODEL_DIR.mkdir(exist_ok=True)
     card_path = detect.MODEL_DIR / "model_card.json"
-    if card_path.exists():
-        card["phenomena"] = json.loads(card_path.read_text())["phenomena"]
-    for phen in sys.argv[1:] or detect.PHENOMENA:
-        boxes = regions.TRAINING[phen]
+    for PHEN in sys.argv[1:] or detect.PHENOMENA:
+        boxes = regions.TRAINING[PHEN]
+        test_boxes = [p["bbox"] for p in regions.PRESETS if p["phenomenon"] == PHEN]
         with ThreadPoolExecutor(4) as ex:
-            loaded = list(ex.map(fetch, boxes))
-        print(f"[{phen}] data ready for {len(boxes)} regions ({time.time() - t0:.0f}s)", flush=True)
-        card["phenomena"][phen] = {"regions": boxes, "variants": {}}
-        for variant in detect.VARIANTS:
-            xs, ys, evals = [], [], []
-            for idx, (b, a, lc0, lc1) in enumerate(loaded):
-                ref, known = detect.reference_change(phen, lc0, lc1)
-                y, known_f, test = ref.ravel(), known.ravel(), test_blocks(ref.shape, idx)
-                for cloudy in (False, True):
-                    opt_b, opt_a = condition(b, a, cloudy, idx)
-                    sb = detect.variant_stack(variant, opt_b, b["sar"])
-                    sa = detect.variant_stack(variant, opt_a, a["sar"])
-                    x, valid = detect.features(sb, sa)
-                    pool = valid & known_f & ~test
-                    pos = np.flatnonzero(pool & y)
-                    neg = np.flatnonzero(pool & ~y)
-                    pos = RNG.choice(pos, min(len(pos), 4000), replace=False)
-                    neg = RNG.choice(neg, min(len(neg), 3 * max(len(pos), 500)), replace=False)
-                    take = np.concatenate([pos, neg])
-                    xs.append(x[take].astype("float32"))
-                    ys.append(y[take])
-                    evals.append((cloudy, x, valid, y, known_f & test, known_f & ~test, ref.shape))
-            model = detect.new_model().fit(np.concatenate(xs), np.concatenate(ys))
-            probs = []
-            for cloudy, x, valid, y, scored, tune, shape in evals:
-                prob = np.zeros(len(y), "float32")
-                prob[valid] = model.predict_proba(x[valid])[:, 1]
-                probs.append(prob.reshape(shape))
-
-            def f1_at(thr, cond, which):
-                tp = fp = fn = 0
-                for prob, (cloudy, _, _, y, scored, tune, _) in zip(probs, evals):
-                    if cond is not None and cloudy != cond:
-                        continue
-                    sel = scored if which == "test" else tune
-                    mask = detect.to_mask(prob, thr).ravel()
-                    tp += int((mask & y & sel).sum())
-                    fp += int((mask & ~y & sel).sum())
-                    fn += int((~mask & y & sel).sum())
-                p = tp / (tp + fp) if tp + fp else 0.0
-                r = tp / (tp + fn) if tp + fn else 0.0
-                return {"precision": round(p, 3), "recall": round(r, 3), "f1": round(2 * p * r / (p + r) if p + r else 0.0, 3)}
-
-            # cut-off tuned on the training blocks only, then scored on the held-out blocks
-            threshold = max(np.arange(0.3, 0.91, 0.05), key=lambda t: f1_at(t, None, "tune")["f1"])
-            threshold = float(round(threshold, 2))
-            joblib.dump({"model": model, "threshold": threshold}, detect.MODEL_DIR / f"{phen}_{variant}.joblib", compress=3)
-            scores = {"clear": f1_at(threshold, False, "test"), "cloudy": f1_at(threshold, True, "test")}
-            card["phenomena"][phen]["variants"][variant] = {"train_pixels": int(sum(len(v) for v in ys)), "threshold": threshold, **scores}
-            print(f"  {variant:8s} thr {threshold:.2f}  clear F1 {scores['clear']['f1']:.3f}   cloudy F1 {scores['cloudy']['f1']:.3f}   ({time.time() - t0:.0f}s)", flush=True)
+            train = list(ex.map(lambda bb: fetch(PHEN, bb), boxes))
+            tests = list(ex.map(lambda bb: fetch(PHEN, bb), test_boxes))
+        print(f"[{PHEN}] data ready: {len(train)} training regions, {len(tests)} presets", flush=True)
+        variants = {v: train_variant(v, train, tests) for v in detect.VARIANTS}
+        card = json.loads(card_path.read_text()) if card_path.exists() else {"phenomena": {}}
+        card.update({
+            "labels": {"deforestation": "Hansen Global Forest Change v1.12 (Landsat, 30 m), loss years after the before date up to the after date",
+                       "urban": "Impact Observatory 10 m annual land cover, not built -> built"},
+            "years": list(YEARS),
+            "pixel_m": scenes.data.PIXEL_M,
+            "model": "HistGradientBoostingClassifier (scikit-learn)",
+            "model_params": detect.MODEL_PARAMS,
+            "evaluation": f"leave-region-out, {FOLDS} folds; 'clear'/'cloudy' are unseen-region scores, 'presets' are the app presets (never trained on)",
+            "cloud_test_fraction": CLOUD_AFTER,
+        })
+        card["phenomena"][PHEN] = {"regions": boxes, "variants": variants}
         card_path.write_text(json.dumps(card, indent=2))
-    print("done", f"{time.time() - t0:.0f}s")
 
 
 if __name__ == "__main__":

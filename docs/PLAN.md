@@ -45,11 +45,11 @@ the models and writes `models/model_card.json`.
 
 ## 4. How the models process data
 
-- **Inputs compared:** radar only (2 bands) · optical only (6 bands: B2, B3, B4, B8, B11, B12) · fused IHS / PCA / wavelet (6 bands each) · band stack (8 bands).
+- **Inputs compared** (each also gets its standard indices: NDVI, NDBI, MNDWI, NBR; VV−VH): radar only (2 bands) · optical only (6 bands: B2, B3, B4, B8, B11, B12) · fused IHS / PCA / wavelet (6 bands each) · band stack (8 bands).
 - **Features per pixel:** before values, after values, difference, difference smoothed at two scales, local texture of each date. Identical recipe for every input.
 - **Model:** gradient-boosted trees (scikit-learn). Same settings for every input. No deep learning.
-- **Labels:** Impact Observatory 10 m annual land cover, 2017 → 2023. Forest loss = trees → crops / built / bare / rangeland. Urban growth = not built → built.
-- **Training data:** six regions per phenomenon; a quarter of each region held out in blocks; each region used once clear and once with synthetic cloud.
+- **Labels:** forest loss = Hansen Global Forest Change loss years 2018–2023 (Landsat, independent of Sentinel-2). Urban growth = not built → built in Impact Observatory 10 m annual land cover, 2017 → 2023.
+- **Training data:** ten regions per phenomenon at a fixed 20 m pixel; scored leave-region-out (5 folds) and on the app presets; each region used once clear and once with synthetic cloud.
 - **Honesty rule:** app presets are never in the training set. Scores are shown whichever way they come out.
 
 ## 5. File layout
@@ -85,7 +85,7 @@ frontend/src/MapView.jsx  map, swipe, drawing
 
 ## 7. Known risks
 
-- **Detection accuracy is modest.** Held-out F1 is 0.42-0.50 for forest loss (radar alone 0.17) and 0.46-0.54 for urban growth. The reference land cover is itself noisy, and radar alone is weak on hill forest. Scores per input are in `backend/models/model_card.json`.
-- **Reference data is not fully independent.** Impact Observatory's map is derived from Sentinel-2. Global Forest Watch (Landsat-based) would be a stronger check for forest loss.
+- **Detection accuracy is modest.** F1 on regions never trained on is 0.25–0.40 for forest loss (radar alone 0.19) and 0.41–0.47 for urban growth; on the app presets, 0.28–0.38 and 0.42–0.53. C-band radar alone is weak on hill forest. Scores per input are in `backend/models/model_card.json`.
+- **Urban reference is not fully independent.** Impact Observatory's map is derived from Sentinel-2. Forest loss now uses Hansen Global Forest Change, which is Landsat-based.
 - **Imagery service can drop connections** under heavy use. Retries are in place; presets should be pre-cached before a demo.
 - **Earth Engine is no longer needed.** The deck names it as the platform, so the review slides need updating.

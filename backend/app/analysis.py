@@ -13,7 +13,10 @@ RUNS = scenes.CACHE / "runs"
 RUNS.mkdir(parents=True, exist_ok=True)
 COLORS = {"sar": (255, 138, 61), "optical": (45, 212, 191), "ihs": (255, 225, 77), "pca": (255, 225, 77),
           "wavelet": (255, 225, 77), "stack": (255, 225, 77), "reference": (255, 77, 141)}
-MAX_SPAN_DEG = 0.75
+ERROR_COLORS = {"correct": (74, 222, 128, 255), "false_alarm": (248, 81, 73, 255), "missed": (77, 166, 255, 255)}
+MAX_SPAN_DEG = 0.3
+REFERENCE_SOURCE = {"deforestation": "Hansen Global Forest Change (Landsat, 30 m)",
+                    "urban": "Impact Observatory 10 m annual land cover"}
 
 
 # ------------------------------------------------------------------ rendering
@@ -63,6 +66,15 @@ def _mask(mask: np.ndarray, color) -> np.ndarray:
     return out
 
 
+def _errors(mask: np.ndarray, ref: np.ndarray, known: np.ndarray) -> np.ndarray:
+    """Detection checked against the reference: correct (green), false alarm (red), missed (blue)."""
+    out = np.zeros((*mask.shape, 4), "uint8")
+    out[mask & ref & known] = ERROR_COLORS["correct"]
+    out[mask & ~ref & known] = ERROR_COLORS["false_alarm"]
+    out[~mask & ref & known] = ERROR_COLORS["missed"]
+    return out
+
+
 def _blind(blind: np.ndarray) -> np.ndarray:
     out = np.zeros((*blind.shape, 4), "uint8")
     out[blind] = (236, 238, 240, 150)
@@ -91,22 +103,18 @@ def run(bbox, before, after, phenomenon: str, cloud: float = 0.0, polygon=None) 
     if phenomenon not in detect.PHENOMENA:
         raise ValueError("Unknown phenomenon.")
     cloud = float(np.clip(cloud, 0, 0.95))
-    run_id = scenes._key([round(b, 5) for b in bbox], list(before), list(after), phenomenon, round(cloud, 2), polygon, "v5")
+    run_id = scenes._key([round(b, 5) for b in bbox], list(before), list(after), phenomenon, round(cloud, 2), polygon, "v7")
     out = RUNS / run_id
     if (out / "result.json").exists():
         return json.loads((out / "result.json").read_text())
     out.mkdir(exist_ok=True)
 
     yb, ya = detect.reference_year(*before), detect.reference_year(*after)
-    has_ref = 2017 <= yb < ya <= 2023
-    with ThreadPoolExecutor(4) as ex:
+    with ThreadPoolExecutor(3) as ex:
         fb = ex.submit(scenes.load_scene, bbox, *before)
         fa = ex.submit(scenes.load_scene, bbox, *after)
-        fl0 = ex.submit(scenes.load_landcover, bbox, yb) if has_ref else None
-        fl1 = ex.submit(scenes.load_landcover, bbox, ya) if has_ref else None
-        b, a = fb.result(), fa.result()
-        lc0 = fl0.result() if has_ref else None
-        lc1 = fl1.result() if has_ref else None
+        fr = ex.submit(scenes.load_reference, bbox, phenomenon, yb, ya)
+        b, a, reference = fb.result(), fa.result(), fr.result()
     grid = a["grid"]
     if not np.isfinite(a["sar"]).any() or not np.isfinite(b["sar"]).any():
         raise ValueError("No Sentinel-1 radar coverage for this area in one of the date ranges. Try different dates.")
@@ -134,12 +142,12 @@ def run(bbox, before, after, phenomenon: str, cloud: float = 0.0, polygon=None) 
         for when, st in zip(("before", "after"), stacks[m]):
             _save(_rgb(st), out / f"{when}_{m}.png", inside)
             layers[when][m] = f"{when}_{m}.png"
-        quality[m] = fusion.quality(np.where(inside[None], opt_a, np.nan), a["sar"], stacks[m][1])
+        quality[m] = fusion.quality(np.where(inside[None], opt_a, np.nan), a["sar"], stacks[m][1][:len(data.S2_BANDS)])  # fused bands, not the indices
 
     # change detection: same detector, six inputs
     ref = known = None
-    if has_ref and lc0 is not None and lc1 is not None:
-        ref, known = detect.reference_change(phenomenon, lc0, lc1)
+    if reference is not None:
+        ref, known = reference
         ref, known = ref & inside, known & inside
         _save(_mask(ref, COLORS["reference"]), out / "change_reference.png")
         layers["change"]["reference"] = "change_reference.png"
@@ -152,6 +160,9 @@ def run(bbox, before, after, phenomenon: str, cloud: float = 0.0, polygon=None) 
         masks[v] = mask
         _save(_mask(mask, COLORS[v]), out / f"change_{v}.png")
         layers["change"][v] = f"change_{v}.png"
+        if ref is not None:
+            _save(_errors(mask, ref, known), out / f"errors_{v}.png")
+            layers["change"][f"errors_{v}"] = f"errors_{v}.png"
         blind = float(np.isnan(prob)[inside].mean())
         variants[v] = {
             "label": detect.VARIANT_LABELS[v],
@@ -186,9 +197,9 @@ def run(bbox, before, after, phenomenon: str, cloud: float = 0.0, polygon=None) 
         "variants": variants,
         "best_fused": best,
         "quality": quality,
-        "reference": {"available": ref is not None, "years": [yb, ya] if has_ref else None,
+        "reference": {"available": ref is not None, "years": [yb, ya] if ref is not None else None,
                       "area_ha": round(float(ref.sum()) * grid.pixel_ha, 1) if ref is not None else None,
-                      "source": "Impact Observatory 10 m annual land cover"},
+                      "source": REFERENCE_SOURCE[phenomenon]},
     }
     (out / "result.json").write_text(json.dumps(result))
     return result
@@ -201,7 +212,7 @@ def change_geojson(run_id: str, variant: str) -> dict:
 
     res = json.loads((RUNS / run_id / "result.json").read_text())
     mask = np.load(RUNS / run_id / "masks.npz")[variant]
-    grid = data.make_grid(res["bbox"], max(res["grid"]["width"], res["grid"]["height"]))
+    grid = data.make_grid(res["bbox"])
     feats = []
     for geom, val in shapes(mask.astype("uint8"), mask=mask, transform=grid.transform):
         g = transform_geom(grid.crs, "EPSG:4326", geom, precision=6)
@@ -212,7 +223,7 @@ def change_geojson(run_id: str, variant: str) -> dict:
 def availability(bbox, year: int) -> dict:
     """Per-month count of usable optical vs radar acquisitions - the cloud calendar."""
     validate(bbox)
-    grid = data.make_grid(bbox, 64)
+    grid = data.make_grid(bbox)
     with ThreadPoolExecutor(2) as ex:
         f2 = ex.submit(data._search, "sentinel-2-l2a", grid, f"{year}-01-01", f"{year}-12-31")
         f1 = ex.submit(data._search, "sentinel-1-rtc", grid, f"{year}-01-01", f"{year}-12-31")

@@ -23,13 +23,13 @@ Innovative Design Project · guide: Prof. Velu M
 |---|---|
 | Ingest | Sentinel-1 RTC (VV, VH) and Sentinel-2 L2A (B2, B3, B4, B8, B11, B12) from Microsoft Planetary Computer. No account needed. |
 | Preprocess | Cloud masking from the Sentinel-2 scene classification; Lee speckle filter on radar; radar is already terrain-corrected. |
-| Co-register | Both sensors resampled onto one shared grid. |
+| Co-register | Both sensors resampled onto one shared 20 m grid; radar always from the same orbit tracks, so viewing geometry does not change between dates. |
 | Fuse | IHS substitution, PCA and wavelet fusion (pixel level), plus an eight-band stack (feature level). |
-| Detect | One gradient-boosted-tree recipe, trained once per input. Same features, settings and clean-up for every input. |
-| Evaluate | Scored against Impact Observatory annual land cover (2017–2023), plus SAM / ERGAS / SSIM / entropy for the fused images. |
+| Detect | One gradient-boosted-tree recipe, trained once per input: bands plus standard indices (NDVI, NDBI, MNDWI, NBR, VV−VH). Same features, settings and clean-up for every input. |
+| Evaluate | Forest loss scored against Hansen Global Forest Change (Landsat, independent of Sentinel-2); urban growth against Impact Observatory annual land cover (2017–2023). Plus SAM / ERGAS / SSIM / entropy for the fused images. |
 
-The models are trained on six regions per phenomenon. The preset regions in the app
-are **not** in the training set.
+The models are trained on ten regions per phenomenon and scored leave-region-out (on regions
+they never saw). The preset regions in the app are **not** in the training set.
 
 ## Run it
 
